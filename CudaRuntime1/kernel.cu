@@ -1,4 +1,5 @@
-﻿#include "cuda_runtime.h"#include "device_launch_parameters.h"
+﻿#include "cuda_runtime.h"
+#include "device_launch_parameters.h"
 #include <chrono>
 #include <time.h>
 #include <stdio.h>
@@ -8,7 +9,7 @@ void reductionWithCudaImproved(float* result, const float* input);
 __global__ void reductionKernelImproved(float* result, const float* input);
 void reductionCPU(float* result, const float* input);
 
-#define SIZE 10000000
+#define SIZE 1000000
 #define TILE 32
 #define ILP 8
 #define BLOCK_X_IMPR (TILE / ILP)
