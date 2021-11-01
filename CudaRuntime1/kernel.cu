@@ -1,140 +1,138 @@
-﻿#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-#include <malloc.h>
-#include <conio.h>
-#include <iostream>
-#include <cstdlib>
+﻿#include "cuda_runtime.h"#include "device_launch_parameters.h"
+#include <chrono>
+#include <time.h>
 #include <stdio.h>
-using namespace std;
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size);
+#include <stdlib.h>
 
-__global__ void addKernel(int *c, const int *a, const int *b)
+void reductionWithCudaImproved(float* result, const float* input);
+__global__ void reductionKernelImproved(float* result, const float* input);
+void reductionCPU(float* result, const float* input);
+
+#define SIZE 10000000
+#define TILE 32
+#define ILP 8
+#define BLOCK_X_IMPR (TILE / ILP)
+#define BLOCK_Y_IMPR 32
+#define BLOCK_COUNT_X_IMPR 100
+
+
+void reductionCPU(float* result, const float* input)
 {
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
+    for (int i = 0; i < SIZE; i++)
+        *result += input[i];
 }
 
-
- void addKernelCPU(int* d, const int* a, const int* b, int arraySize)
+__global__ void reductionKernelImproved(float* result, const float* input)
 {
-     for (int i = 0; i < arraySize; i++) {
-         d[i] = a[i] + b[i];
-     }
-    
+    int i;
+    int col = (blockDim.x * blockIdx.x + threadIdx.x) * ILP;
+    int row = blockDim.y * blockIdx.y + threadIdx.y;
+    int index = row * blockDim.x * gridDim.x * ILP + col;
+    __shared__ float interResult;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0)
+        interResult = 0.0;
+
+    __syncthreads();
+
+#pragma unroll ILP
+    for (i = 0; i < ILP; i++)
+    {
+        if (index < SIZE)
+        {
+            atomicAdd(&interResult, input[index]);
+            index++;
+        }
+    }
+
+    __syncthreads();
+
+    if (threadIdx.x == 0 && threadIdx.y == 0)
+        atomicAdd(result, interResult);
 }
+
+void reductionWithCudaImproved(float* result, const float* input)
+{
+    dim3 dim_grid, dim_block;
+
+    float* dev_input = 0;
+    float* dev_result = 0;
+    cudaEvent_t start, stop;
+    float elapsed = 0;
+    double gpuBandwidth;
+
+    dim_block.x = BLOCK_X_IMPR;
+    dim_block.y = BLOCK_Y_IMPR;
+    dim_block.z = 1;
+
+    dim_grid.x = BLOCK_COUNT_X_IMPR;
+    dim_grid.y = (int)ceil((float)SIZE / (float)(TILE * dim_block.y * BLOCK_COUNT_X_IMPR));
+    dim_grid.z = 1;
+
+    cudaSetDevice(0);
+
+    cudaMalloc((void**)&dev_input, SIZE * sizeof(float));
+    cudaMalloc((void**)&dev_result, sizeof(float));
+    cudaMemcpy(dev_input, input, SIZE * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(dev_result, result, sizeof(float), cudaMemcpyHostToDevice);
+
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+
+    cudaEventRecord(start);
+    reductionKernelImproved << <dim_grid, dim_block >> > (dev_result, dev_input);
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    cudaEventElapsedTime(&elapsed, start, stop);
+
+    printf("GPU Time (improved): %f ms\n", elapsed);
+
+    cudaDeviceSynchronize();
+
+    cudaMemcpy(result, dev_result, sizeof(float), cudaMemcpyDeviceToHost);
+
+    cudaFree(dev_input);
+    cudaFree(dev_result);
+
+    return;
+}
+
 
 int main()
 {
-    const int arraySize = 1000;
-    int* a = (int*)_alloca(arraySize * sizeof(int));
-    int* b = (int*)_alloca(arraySize * sizeof(int));
-    size_t i;
+    int i;
+    float* input;
+    float resultCPU, resultGPU;
+    double cpuTime, cpuBandwidth;
+    printf("Size : %d \n", SIZE);
+    input = (float*)malloc(SIZE * sizeof(float));
+    resultCPU = 0.0;
+    resultGPU = 0.0;
 
-    for (i = 0; i < arraySize; i++) {
-        a[i] = rand() % 1000;
-        b[i] = rand() % 1000;
-    }
-    int c[arraySize] = { 0 };
-    int d[arraySize] = { 0 };
+    srand((int)time(NULL));
 
-    addKernelCPU(d,a,b,arraySize);
-    // Add vectors in parallel.
-    cudaError_t cudaStatus = addWithCuda(c, a, b, arraySize);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addWithCuda failed!");
-        return 1;
-    }
+    auto start = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::high_resolution_clock::now();
 
-    // cudaDeviceReset must be called before exiting in order for profiling and
-    // tracing tools such as Nsight and Visual Profiler to show complete traces.
-    cudaStatus = cudaDeviceReset();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceReset failed!");
-        return 1;
-    }
-    bool flag = true;
-    for (int j = 0; j < arraySize; j++) {
-        if (c[j]!=d[j]) cout << "Error";
-    }
+    for (i = 0; i < SIZE; i++)
+        input[i] = rand() % 10 - 5;
+
+    start = std::chrono::high_resolution_clock::now();
+    reductionCPU(&resultCPU, input);
+    end = std::chrono::high_resolution_clock::now();
+
+    std::chrono::duration<double> diff = end - start;
+    cpuTime = (diff.count() * 1000);
+    printf("CPU Time: %f ms\n", cpuTime);
+
+    reductionWithCudaImproved(&resultGPU, input);
+
+    if (resultCPU != resultGPU)
+        printf("CPU result does not match GPU result \n\n");
+    else
+        printf("CPU result matches GPU result\n\n");
+
     return 0;
-}
-
-// Helper function for using CUDA to add vectors in parallel.
-cudaError_t addWithCuda(int *c, const int *a, const int *b, unsigned int size)
-{
-    int *dev_a = 0;
-    int *dev_b = 0;
-    int *dev_c = 0;
-    cudaError_t cudaStatus;
-
-    // Choose which GPU to run on, change this on a multi-GPU system.
-    cudaStatus = cudaSetDevice(0);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
-        goto Error;
-    }
-
-    // Allocate GPU buffers for three vectors (two input, one output)    .
-    cudaStatus = cudaMalloc((void**)&dev_c, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMalloc((void**)&dev_a, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMalloc((void**)&dev_b, size * sizeof(int));
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMalloc failed!");
-        goto Error;
-    }
-
-    // Copy input vectors from host memory to GPU buffers.
-    cudaStatus = cudaMemcpy(dev_a, a, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-    cudaStatus = cudaMemcpy(dev_b, b, size * sizeof(int), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-    // Launch a kernel on the GPU with one thread for each element.
-    addKernel<<<1, size>>>(dev_c, dev_a, dev_b);
-
-    // Check for any errors launching the kernel
-    cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "addKernel launch failed: %s\n", cudaGetErrorString(cudaStatus));
-        goto Error;
-    }
-    
-    // cudaDeviceSynchronize waits for the kernel to finish, and returns
-    // any errors encountered during the launch.
-    cudaStatus = cudaDeviceSynchronize();
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching addKernel!\n", cudaStatus);
-        goto Error;
-    }
-
-    // Copy output vector from GPU buffer to host memory.
-    cudaStatus = cudaMemcpy(c, dev_c, size * sizeof(int), cudaMemcpyDeviceToHost);
-    if (cudaStatus != cudaSuccess) {
-        fprintf(stderr, "cudaMemcpy failed!");
-        goto Error;
-    }
-
-Error:
-    cudaFree(dev_c);
-    cudaFree(dev_a);
-    cudaFree(dev_b);
-    
-    return cudaStatus;
 }
